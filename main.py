@@ -96,6 +96,7 @@ def healthz():
 
 
 @app.post("/")
+@app.post("/v1/mailroom/actions")
 async def mailroom(request: Request):
     try:
         data = await read_request(request)
