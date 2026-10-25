@@ -66,7 +66,7 @@ def generate_candidate(dossier):
         raise RuntimeError("OPENAI_API_KEY is not configured")
 
     user_content = {
-        "allowedActions": ACTIONS,
+        "allowedActions": sorted(ACTIONS),
         "outputRequirements": {
             "dossierId": "Copy the exact dossierId from the dossier.",
             "action": "Choose exactly one allowed action.",
@@ -171,7 +171,6 @@ def generate_candidate(dossier):
     )
 
     content = result.choices[0].message.content
-
     if not content:
         raise ValueError("Empty model response")
 
@@ -180,9 +179,9 @@ def generate_candidate(dossier):
     if not isinstance(candidate, dict):
         raise ValueError("Model output must be a JSON object")
 
-    # Recover a payload only if it is a JSON-encoded object string.
     payload = candidate.get("payload")
 
+    # Decode only when payload is a JSON-encoded object string.
     if isinstance(payload, str):
         try:
             decoded_payload = json.loads(payload)
@@ -192,8 +191,12 @@ def generate_candidate(dossier):
         if isinstance(decoded_payload, dict):
             candidate["payload"] = decoded_payload
 
-    if not isinstance(candidate.get("payload"), dict):
-        raise ValueError("Model payload must be a JSON object")
+    payload = candidate.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError(
+            "Model payload must be a JSON object; received "
+            f"{type(payload).__name__}: {str(payload)[:300]}"
+        )
 
     if not isinstance(candidate.get("evidence"), list):
         raise ValueError("Model evidence must be a list")
@@ -221,6 +224,12 @@ def decide(dossier):
         "payload": candidate.get("payload"),
         "evidence": candidate.get("evidence"),
     }
+
+    if not isinstance(proposal["payload"], dict):
+        raise ValueError(
+            "Proposal payload is "
+            f"{type(proposal['payload']).__name__}"
+        )
 
     validate_proposal(proposal, dossier, ACTIONS)
 
