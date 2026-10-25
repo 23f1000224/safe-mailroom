@@ -4,7 +4,7 @@ import os
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
+from openai import OpenAI
 
 import storage
 from decision_engine import decide
@@ -19,14 +19,10 @@ from security import (
     canonical_digest,
     canonical_json,
     proposal_digest,
-    valid_digest,
     verify_receipt_signature,
 )
 from storage import (
-    DecisionCache,
     Evaluation,
-    Proposal,
-    SavedReceipt,
     SessionLocal,
     get_cached_proposal,
     list_proposals,
@@ -42,6 +38,18 @@ app = FastAPI(
 
 MAX_REQUEST_BYTES = 5 * 1024 * 1024
 MAX_RESPONSE_BYTES = 512 * 1024
+
+MODEL_NAME = os.getenv(
+    "MODEL_NAME",
+    os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+
+client = (
+    OpenAI(api_key=OPENAI_API_KEY)
+    if OPENAI_API_KEY
+    else None
+)
 
 
 @app.on_event("startup")
@@ -69,10 +77,23 @@ def response_json(data, status_code=200):
     )
 
 
-async def read_request(request):
+async def read_request(request: Request):
     content_type = request.headers.get("content-type", "")
-    if "application/json" not in content_type.lower():
-        raise ValueError("Content-Type must be application/json")
+    media_type = content_type.split(";", 1)[0].strip().lower()
+
+    if media_type != "application/json":
+        raise ValueError(
+            "Content-Type must be application/json"
+        )
+
+    content_length = request.headers.get("content-length")
+
+    if content_length:
+        try:
+            if int(content_length) > MAX_REQUEST_BYTES:
+                raise OverflowError("Request body is too large")
+        except ValueError:
+            raise ValueError("Invalid Content-Length")
 
     raw = await request.body()
 
@@ -100,25 +121,34 @@ def model_test():
     if client is None:
         return JSONResponse(
             status_code=503,
-            content={"ok": False, "error": "Model client not configured"},
+            content={
+                "ok": False,
+                "error": "Model client not configured",
+            },
         )
 
     try:
         result = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
-                {"role": "user", "content": "Reply with OK only."}
+                {
+                    "role": "user",
+                    "content": "Reply with OK only.",
+                }
             ],
             max_tokens=5,
             timeout=15,
         )
+
         return {
             "ok": True,
             "model": MODEL_NAME,
             "reply": result.choices[0].message.content,
         }
+
     except Exception as exc:
         print("Model test failed:", type(exc).__name__)
+
         return JSONResponse(
             status_code=503,
             content={
@@ -128,57 +158,40 @@ def model_test():
         )
 
 
-@app.post(
-    "/",
-    openapi_extra={
-        "requestBody": {
-            "required": True,
-            "content": {
-                "application/json": {
-                    "schema": {
-                        "type": "object",
-                        "required": ["operation"],
-                        "properties": {
-                            "operation": {
-                                "type": "string",
-                                "enum": ["propose", "commit"]
-                            }
-                        },
-                        "additionalProperties": True
-                    }
+REQUEST_BODY_SCHEMA = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "required": ["operation"],
+                    "properties": {
+                        "operation": {
+                            "type": "string",
+                            "enum": ["propose", "commit"],
+                        }
+                    },
+                    "additionalProperties": True,
                 }
             }
-        }
-    },
-)
+        },
+    }
+}
+
+
+@app.post("/", openapi_extra=REQUEST_BODY_SCHEMA)
 @app.post(
     "/v1/mailroom/actions",
-    openapi_extra={
-        "requestBody": {
-            "required": True,
-            "content": {
-                "application/json": {
-                    "schema": {
-                        "type": "object",
-                        "required": ["operation"],
-                        "properties": {
-                            "operation": {
-                                "type": "string",
-                                "enum": ["propose", "commit"]
-                            }
-                        },
-                        "additionalProperties": True
-                    }
-                }
-            }
-        }
-    },
+    openapi_extra=REQUEST_BODY_SCHEMA,
 )
 async def mailroom(request: Request):
     try:
         data = await read_request(request)
+
     except OverflowError as exc:
         return json_error(413, str(exc))
+
     except ValueError as exc:
         return json_error(400, str(exc))
 
@@ -193,10 +206,10 @@ async def mailroom(request: Request):
     return json_error(422, "Unsupported operation")
 
 
-
 async def handle_propose(data):
     try:
         validate_top_level_propose(data)
+
         dossiers = data["dossiers"]
         validate_dossiers(dossiers)
 
@@ -227,27 +240,41 @@ async def handle_propose(data):
 
     try:
         with SessionLocal() as session:
-            # Build every proposal before persisting this evaluation.
+            # Build all proposals before saving the evaluation.
             for dossier in dossiers:
                 fingerprint = canonical_digest(dossier)
-                cached = get_cached_proposal(session, fingerprint)
+
+                cached = get_cached_proposal(
+                    session,
+                    fingerprint,
+                )
 
                 if cached is None:
-                    fingerprint, proposal = decide(dossier)
+                    returned_fingerprint, proposal = decide(dossier)
 
-                    # Validate the generated output again.
+                    # Use the fingerprint returned by the decision engine
+                    # only if it matches the canonical dossier fingerprint.
+                    if returned_fingerprint != fingerprint:
+                        raise ValueError(
+                            "Decision engine fingerprint mismatch"
+                        )
+
                     validate_proposal(
                         proposal,
                         dossier,
                         data["allowedActions"],
                     )
+
                     save_cached_proposal(
-                        session, fingerprint, proposal
+                        session,
+                        fingerprint,
+                        proposal,
                     )
+
                 else:
                     proposal = cached
 
-                    # A cache entry is never trusted without revalidation.
+                    # Cached output must always be revalidated.
                     validate_proposal(
                         proposal,
                         dossier,
@@ -266,14 +293,20 @@ async def handle_propose(data):
                 "status": "awaiting_receipts",
                 "inputDigest": input_digest,
                 "proposals": [
-                    item["proposal"] for item in proposals
+                    item["proposal"]
+                    for item in proposals
                 ],
             }
 
-            # Do not return a success that violates the size limit.
-            if len(canonical_json(response).encode("utf-8")) > MAX_RESPONSE_BYTES:
+            if (
+                len(canonical_json(response).encode("utf-8"))
+                > MAX_RESPONSE_BYTES
+            ):
                 session.rollback()
-                return json_error(413, "Response exceeds 512 KiB")
+                return json_error(
+                    413,
+                    "Response exceeds 512 KiB",
+                )
 
             save_evaluation(
                 session,
@@ -290,14 +323,18 @@ async def handle_propose(data):
         return response_json(response)
 
     except Exception as exc:
-        # Log only the error class; do not log dossier text or secrets.
         print("Propose failed:", type(exc).__name__)
-        return json_error(503, "Unable to safely process proposals")
+
+        return json_error(
+            503,
+            "Unable to safely process proposals",
+        )
 
 
 def handle_commit(data):
     try:
         validate_commit_envelope(data)
+
         evaluation_id = data["evaluationId"]
         input_digest = data["inputDigest"]
         receipts = data["receipts"]
@@ -308,7 +345,13 @@ def handle_commit(data):
 
     try:
         with SessionLocal() as session:
-            evaluation = session.get(Evaluation, evaluation_id)
+            # Serialize commit processing so two concurrent commits
+            # cannot both verify and save different receipt batches.
+            evaluation = session.execute(
+                select(Evaluation)
+                .where(Evaluation.id == evaluation_id)
+                .with_for_update()
+            ).scalar_one_or_none()
 
             if evaluation is None:
                 return json_error(409, "Unknown evaluation")
@@ -337,11 +380,15 @@ def handle_commit(data):
                 )
 
             by_dossier = {
-                item["dossierId"]: item for item in stored
+                item["dossierId"]: item
+                for item in stored
             }
 
             if len(by_dossier) != len(stored):
-                return json_error(500, "Stored proposal conflict")
+                return json_error(
+                    500,
+                    "Stored proposal conflict",
+                )
 
             seen_dossiers = set()
             seen_receipt_ids = set()
@@ -349,35 +396,56 @@ def handle_commit(data):
 
             public_jwk = json.loads(evaluation.verifier_jwk)
 
-            # First validate every receipt. No receipt is persisted
-            # until the entire batch has passed.
+            # Validate every receipt before persisting any receipt.
             for receipt in receipts:
                 dossier_id = receipt["dossierId"]
+                receipt_id = receipt["receiptId"]
 
                 if dossier_id in seen_dossiers:
-                    return json_error(422, "Duplicate dossier receipt")
+                    return json_error(
+                        422,
+                        "Duplicate dossier receipt",
+                    )
+
                 seen_dossiers.add(dossier_id)
 
-                if receipt["receiptId"] in seen_receipt_ids:
-                    return json_error(422, "Duplicate receipt ID")
-                seen_receipt_ids.add(receipt["receiptId"])
+                if receipt_id in seen_receipt_ids:
+                    return json_error(
+                        422,
+                        "Duplicate receipt ID",
+                    )
+
+                seen_receipt_ids.add(receipt_id)
 
                 saved = by_dossier.get(dossier_id)
+
                 if saved is None:
-                    return json_error(422, "Receipt for unknown dossier")
+                    return json_error(
+                        422,
+                        "Receipt for unknown dossier",
+                    )
 
                 proposal = saved["proposal"]
 
                 if receipt["callId"] != proposal["callId"]:
-                    return json_error(422, "Receipt callId mismatch")
+                    return json_error(
+                        422,
+                        "Receipt callId mismatch",
+                    )
 
                 if receipt["action"] != proposal["action"]:
-                    return json_error(422, "Receipt action mismatch")
+                    return json_error(
+                        422,
+                        "Receipt action mismatch",
+                    )
 
                 expected_digest = saved["proposalDigest"]
 
                 if receipt["proposalDigest"] != expected_digest:
-                    return json_error(422, "Proposal digest mismatch")
+                    return json_error(
+                        422,
+                        "Proposal digest mismatch",
+                    )
 
                 verify_receipt_signature(
                     public_jwk,
@@ -389,9 +457,12 @@ def handle_commit(data):
                 verified[dossier_id] = receipt
 
             if seen_dossiers != set(by_dossier):
-                return json_error(422, "Missing proposal receipt")
+                return json_error(
+                    422,
+                    "Missing proposal receipt",
+                )
 
-            # All signatures and scopes passed. Now prepare outcomes.
+            # All receipt signatures and scopes have passed.
             outcomes = []
 
             for saved in stored:
@@ -405,7 +476,8 @@ def handle_commit(data):
                     "proposalDigest": saved["proposalDigest"],
                     "receiptId": receipt["receiptId"],
                     "status": (
-                        "executed" if receipt["accepted"]
+                        "executed"
+                        if receipt["accepted"]
                         else "rejected"
                     ),
                 })
@@ -413,7 +485,10 @@ def handle_commit(data):
             response = save_receipts_and_commit_response(
                 session,
                 evaluation,
-                [verified[item["dossierId"]] for item in stored],
+                [
+                    verified[item["dossierId"]]
+                    for item in stored
+                ],
                 outcomes,
                 request_hash,
             )
@@ -424,6 +499,11 @@ def handle_commit(data):
 
     except ValueError as exc:
         return json_error(422, str(exc))
+
     except Exception as exc:
         print("Commit failed:", type(exc).__name__)
-        return json_error(503, "Unable to safely verify commit")
+
+        return json_error(
+            503,
+            "Unable to safely verify commit",
+        )
