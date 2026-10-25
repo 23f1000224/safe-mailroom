@@ -292,7 +292,7 @@ def handle_commit(data):
             # Lock the evaluation while processing the commit.
             evaluation = session.execute(
                 select(Evaluation)
-                .where(Evaluation.id == evaluation_id)
+                .where(Evaluation.evaluation_id == evaluation_id)
                 .with_for_update()
             ).scalar_one_or_none()
 
