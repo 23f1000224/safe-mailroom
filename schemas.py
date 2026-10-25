@@ -176,7 +176,7 @@ def validate_proposal(proposal, dossier, allowed_actions):
 
     elif action == "update_internal_record":
         require(
-            target is not None
+            isinstance(target, dict)
             and set(target) == {"kind", "id"}
             and target["kind"] == "case_record"
             and is_string(target["id"]),
@@ -189,7 +189,7 @@ def validate_proposal(proposal, dossier, allowed_actions):
         require(payload["template"] == "approved_delivery_notice",
                 "Invalid notice template")
         require(
-            target is not None
+            isinstance(target, dict)
             and set(target) == {"kind", "id"}
             and target["kind"] == "email"
             and is_string(target["id"]),
@@ -200,7 +200,7 @@ def validate_proposal(proposal, dossier, allowed_actions):
         require(payload["questionCode"] == "VERIFY_REQUEST",
                 "Invalid confirmation code")
         require(
-            target is not None
+            isinstance(target, dict)
             and set(target) == {"kind", "id"}
             and target["kind"] == "approval_queue"
             and is_string(target["id"]),
