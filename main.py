@@ -267,7 +267,7 @@ async def handle_propose(data):
         return response_json(response)
 
     except Exception as exc:
-        print("Propose failed:", type(exc).__name__)
+        print("Propose failed:", type(exc).__name__, str(exc)[:300])
 
         return json_error(
             503,
