@@ -93,7 +93,9 @@ async def read_request(request):
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
-    @app.get("/model-test")
+
+
+@app.get("/model-test")
 def model_test():
     if client is None:
         return JSONResponse(
@@ -124,7 +126,6 @@ def model_test():
                 "error": type(exc).__name__,
             },
         )
-
 
 
 @app.post(
