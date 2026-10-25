@@ -95,8 +95,53 @@ def healthz():
     return {"status": "ok"}
 
 
-@app.post("/")
-@app.post("/v1/mailroom/actions")
+
+@app.post(
+    "/",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["operation"],
+                        "properties": {
+                            "operation": {
+                                "type": "string",
+                                "enum": ["propose", "commit"]
+                            }
+                        },
+                        "additionalProperties": True
+                    }
+                }
+            }
+        }
+    },
+)
+@app.post(
+    "/v1/mailroom/actions",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["operation"],
+                        "properties": {
+                            "operation": {
+                                "type": "string",
+                                "enum": ["propose", "commit"]
+                            }
+                        },
+                        "additionalProperties": True
+                    }
+                }
+            }
+        }
+    },
+)
 async def mailroom(request: Request):
     try:
         data = await read_request(request)
@@ -114,6 +159,7 @@ async def mailroom(request: Request):
         return handle_commit(data)
 
     return json_error(422, "Unsupported operation")
+
 
 
 async def handle_propose(data):
