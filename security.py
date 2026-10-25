@@ -87,7 +87,6 @@ def verify_receipt_signature(
     if not isinstance(signature_text, str):
         raise ValueError("Missing receipt signature")
 
-    # Signatures use standard Base64, not Base64URL.
     try:
         signature = base64.b64decode(
             signature_text,
@@ -98,7 +97,6 @@ def verify_receipt_signature(
             "Invalid receipt signature encoding"
         ) from exc
 
-    # The signed receipt excludes receiptSignature.
     inner_receipt = {
         key: value
         for key, value in receipt.items()
@@ -124,10 +122,7 @@ def verify_receipt_signature(
 
 
 def make_call_id(dossier_id, fingerprint):
-    # Stable across evaluations for identical dossier content.
-    raw = sha256_hex(
-        dossier_id + ":" + fingerprint
-    )
+    raw = sha256_hex(dossier_id + ":" + fingerprint)
     return "mailroom-" + raw[:48]
 
 
