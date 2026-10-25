@@ -80,13 +80,15 @@ def verify_receipt_signature(public_jwk, evaluation_id,
         raise ValueError("Missing receipt signature")
 
     # Signatures use standard base64, not base64url.
-    try:
-    signature = base64.b64decode(
-        signature_text,
-        validate=True,
-    )
+        try:
+        signature = base64.b64decode(
+            signature_text,
+            validate=True,
+        )
     except (ValueError, base64.binascii.Error) as exc:
-        raise ValueError("Invalid receipt signature encoding") from exc
+        raise ValueError(
+            "Invalid receipt signature encoding"
+        ) from exc
     # The signed receipt excludes receiptSignature.
     inner_receipt = {
         key: value
