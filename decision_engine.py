@@ -7,16 +7,27 @@ from openai import OpenAI
 from security import canonical_digest, make_call_id
 from schemas import validate_proposal
 
-MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4.1-mini")
-API_KEY = os.getenv("OPENAI_API_KEY")
-BASE_URL = os.getenv("OPENAI_BASE_URL")
+MODEL_NAME = os.getenv(
+    "MODEL_NAME",
+    os.getenv("OPENAI_MODEL", "openai/gpt-oss-20b"),
+).strip()
+
+API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+BASE_URL = os.getenv(
+    "OPENAI_BASE_URL",
+    "https://api.groq.com/openai/v1",
+).strip()
 
 client = (
-    OpenAI(api_key=API_KEY, base_url=BASE_URL)
+    OpenAI(
+        api_key=API_KEY,
+        base_url=BASE_URL,
+        timeout=30.0,
+        max_retries=1,
+    )
     if API_KEY
     else None
 )
-
 ACTIONS = [
     "create_draft",
     "update_internal_record",
