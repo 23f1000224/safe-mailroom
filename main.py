@@ -136,7 +136,7 @@ def model_test():
                     "content": "Reply with OK only.",
                 }
             ],
-            max_tokens=5,
+            max_tokens=20,
             timeout=15,
         )
 
