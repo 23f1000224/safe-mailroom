@@ -81,10 +81,10 @@ def verify_receipt_signature(public_jwk, evaluation_id,
 
     # Signatures use standard base64, not base64url.
         try:
-        signature = base64.b64decode(
-            signature_text,
-            validate=True,
-        )
+            signature = base64.b64decode(
+             signature_text,
+             validate=True,
+            )
     except (ValueError, base64.binascii.Error) as exc:
         raise ValueError(
             "Invalid receipt signature encoding"
