@@ -93,6 +93,37 @@ async def read_request(request):
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
+    @app.get("/model-test")
+def model_test():
+    if client is None:
+        return JSONResponse(
+            status_code=503,
+            content={"ok": False, "error": "Model client not configured"},
+        )
+
+    try:
+        result = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "user", "content": "Reply with OK only."}
+            ],
+            max_tokens=5,
+            timeout=15,
+        )
+        return {
+            "ok": True,
+            "model": MODEL_NAME,
+            "reply": result.choices[0].message.content,
+        }
+    except Exception as exc:
+        print("Model test failed:", type(exc).__name__)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "ok": False,
+                "error": type(exc).__name__,
+            },
+        )
 
 
 
