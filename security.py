@@ -53,13 +53,21 @@ def decode_base64url(value):
         raise ValueError("Invalid base64url characters")
 
     padded = value + "=" * (-len(value) % 4)
-    result = base64.urlsafe_b64decode(padded)
+
+    try:
+        result = base64.urlsafe_b64decode(padded)
+    except (ValueError, base64.binascii.Error) as exc:
+        raise ValueError("Invalid base64url value") from exc
 
     return result
 
 
-def verify_receipt_signature(public_jwk, evaluation_id,
-                             input_digest, receipt):
+def verify_receipt_signature(
+    public_jwk,
+    evaluation_id,
+    input_digest,
+    receipt,
+):
     if not isinstance(public_jwk, dict):
         raise ValueError("Missing public key")
 
@@ -79,16 +87,17 @@ def verify_receipt_signature(public_jwk, evaluation_id,
     if not isinstance(signature_text, str):
         raise ValueError("Missing receipt signature")
 
-    # Signatures use standard base64, not base64url.
-        try:
-            signature = base64.b64decode(
-                signature_text,
-                validate=True,
-            )
+    # Signatures use standard Base64, not Base64URL.
+    try:
+        signature = base64.b64decode(
+            signature_text,
+            validate=True,
+        )
     except (ValueError, base64.binascii.Error) as exc:
         raise ValueError(
             "Invalid receipt signature encoding"
         ) from exc
+
     # The signed receipt excludes receiptSignature.
     inner_receipt = {
         key: value
@@ -104,7 +113,6 @@ def verify_receipt_signature(public_jwk, evaluation_id,
     }
 
     message = canonical_json(signed_object).encode("utf-8")
-
     key = Ed25519PublicKey.from_public_bytes(public_bytes)
 
     try:
