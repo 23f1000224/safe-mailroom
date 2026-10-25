@@ -1,10 +1,8 @@
-
 import json
-import os
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from openai import OpenAI
+from sqlalchemy import select
 
 import storage
 from decision_engine import decide
@@ -31,6 +29,7 @@ from storage import (
     save_receipts_and_commit_response,
 )
 
+
 app = FastAPI(
     title="Safe AI Mailroom",
     version="2.0.0",
@@ -38,18 +37,6 @@ app = FastAPI(
 
 MAX_REQUEST_BYTES = 5 * 1024 * 1024
 MAX_RESPONSE_BYTES = 512 * 1024
-
-MODEL_NAME = os.getenv(
-    "MODEL_NAME",
-    os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-)
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-
-client = (
-    OpenAI(api_key=OPENAI_API_KEY)
-    if OPENAI_API_KEY
-    else None
-)
 
 
 @app.on_event("startup")
@@ -82,18 +69,21 @@ async def read_request(request: Request):
     media_type = content_type.split(";", 1)[0].strip().lower()
 
     if media_type != "application/json":
-        raise ValueError(
-            "Content-Type must be application/json"
-        )
+        raise ValueError("Content-Type must be application/json")
 
     content_length = request.headers.get("content-length")
 
     if content_length:
         try:
-            if int(content_length) > MAX_REQUEST_BYTES:
-                raise OverflowError("Request body is too large")
-        except ValueError:
+            length = int(content_length)
+        except ValueError as exc:
+            raise ValueError("Invalid Content-Length") from exc
+
+        if length < 0:
             raise ValueError("Invalid Content-Length")
+
+        if length > MAX_REQUEST_BYTES:
+            raise OverflowError("Request body is too large")
 
     raw = await request.body()
 
@@ -114,48 +104,6 @@ async def read_request(request: Request):
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
-
-
-@app.get("/model-test")
-def model_test():
-    if client is None:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "ok": False,
-                "error": "Model client not configured",
-            },
-        )
-
-    try:
-        result = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {
-                    "role": "user",
-                    "content": "Reply with OK only.",
-                }
-            ],
-            max_tokens=20,
-            timeout=15,
-        )
-
-        return {
-            "ok": True,
-            "model": MODEL_NAME,
-            "reply": result.choices[0].message.content,
-        }
-
-    except Exception as exc:
-        print("Model test failed:", type(exc).__name__)
-
-        return JSONResponse(
-            status_code=503,
-            content={
-                "ok": False,
-                "error": type(exc).__name__,
-            },
-        )
 
 
 REQUEST_BODY_SCHEMA = {
@@ -188,10 +136,8 @@ REQUEST_BODY_SCHEMA = {
 async def mailroom(request: Request):
     try:
         data = await read_request(request)
-
     except OverflowError as exc:
         return json_error(413, str(exc))
-
     except ValueError as exc:
         return json_error(400, str(exc))
 
@@ -221,11 +167,11 @@ async def handle_propose(data):
     except (ValueError, TypeError, KeyError) as exc:
         return json_error(422, str(exc))
 
-    # An exact replay must reuse the stored response.
+    # Replays must return the original saved proposal response.
     with SessionLocal() as session:
         existing = session.get(Evaluation, evaluation_id)
 
-        if existing:
+        if existing is not None:
             if existing.request_hash != request_hash:
                 return json_error(
                     409,
@@ -240,7 +186,7 @@ async def handle_propose(data):
 
     try:
         with SessionLocal() as session:
-            # Build all proposals before saving the evaluation.
+            # Build and validate all proposals before saving the evaluation.
             for dossier in dossiers:
                 fingerprint = canonical_digest(dossier)
 
@@ -252,8 +198,6 @@ async def handle_propose(data):
                 if cached is None:
                     returned_fingerprint, proposal = decide(dossier)
 
-                    # Use the fingerprint returned by the decision engine
-                    # only if it matches the canonical dossier fingerprint.
                     if returned_fingerprint != fingerprint:
                         raise ValueError(
                             "Decision engine fingerprint mismatch"
@@ -270,22 +214,23 @@ async def handle_propose(data):
                         fingerprint,
                         proposal,
                     )
-
                 else:
                     proposal = cached
 
-                    # Cached output must always be revalidated.
+                    # Never trust cached proposals without revalidation.
                     validate_proposal(
                         proposal,
                         dossier,
                         data["allowedActions"],
                     )
 
-                proposals.append({
-                    "proposal": proposal,
-                    "fingerprint": fingerprint,
-                    "proposalDigest": proposal_digest(proposal),
-                })
+                proposals.append(
+                    {
+                        "proposal": proposal,
+                        "fingerprint": fingerprint,
+                        "proposalDigest": proposal_digest(proposal),
+                    }
+                )
 
             response = {
                 "profile": PROFILE,
@@ -293,8 +238,7 @@ async def handle_propose(data):
                 "status": "awaiting_receipts",
                 "inputDigest": input_digest,
                 "proposals": [
-                    item["proposal"]
-                    for item in proposals
+                    item["proposal"] for item in proposals
                 ],
             }
 
@@ -345,8 +289,7 @@ def handle_commit(data):
 
     try:
         with SessionLocal() as session:
-            # Serialize commit processing so two concurrent commits
-            # cannot both verify and save different receipt batches.
+            # Lock the evaluation while processing the commit.
             evaluation = session.execute(
                 select(Evaluation)
                 .where(Evaluation.id == evaluation_id)
@@ -359,7 +302,7 @@ def handle_commit(data):
             if evaluation.input_digest != input_digest:
                 return json_error(409, "Input digest mismatch")
 
-            # Exact commit replay.
+            # An exact commit replay returns the saved response.
             if evaluation.commit_response is not None:
                 if evaluation.commit_request_hash != request_hash:
                     return json_error(
@@ -396,7 +339,7 @@ def handle_commit(data):
 
             public_jwk = json.loads(evaluation.verifier_jwk)
 
-            # Validate every receipt before persisting any receipt.
+            # Validate every receipt before saving any receipt or outcome.
             for receipt in receipts:
                 dossier_id = receipt["dossierId"]
                 receipt_id = receipt["receiptId"]
@@ -439,9 +382,7 @@ def handle_commit(data):
                         "Receipt action mismatch",
                     )
 
-                expected_digest = saved["proposalDigest"]
-
-                if receipt["proposalDigest"] != expected_digest:
+                if receipt["proposalDigest"] != saved["proposalDigest"]:
                     return json_error(
                         422,
                         "Proposal digest mismatch",
@@ -462,25 +403,27 @@ def handle_commit(data):
                     "Missing proposal receipt",
                 )
 
-            # All receipt signatures and scopes have passed.
+            # All receipts passed verification. Only now build the outcomes.
             outcomes = []
 
             for saved in stored:
                 dossier_id = saved["dossierId"]
                 receipt = verified[dossier_id]
 
-                outcomes.append({
-                    "dossierId": dossier_id,
-                    "callId": saved["callId"],
-                    "action": saved["proposal"]["action"],
-                    "proposalDigest": saved["proposalDigest"],
-                    "receiptId": receipt["receiptId"],
-                    "status": (
-                        "executed"
-                        if receipt["accepted"]
-                        else "rejected"
-                    ),
-                })
+                outcomes.append(
+                    {
+                        "dossierId": dossier_id,
+                        "callId": saved["callId"],
+                        "action": saved["proposal"]["action"],
+                        "proposalDigest": saved["proposalDigest"],
+                        "receiptId": receipt["receiptId"],
+                        "status": (
+                            "executed"
+                            if receipt["accepted"]
+                            else "rejected"
+                        ),
+                    }
+                )
 
             response = save_receipts_and_commit_response(
                 session,
